@@ -1,7 +1,6 @@
 #include <iostream>
 #include <windows.h>
 #include <string>
-#include <vector>
 
 bool is_prime(int n) {
     if (n <= 1) return false;
@@ -13,99 +12,76 @@ bool is_prime(int n) {
     return true;
 }
 
-void run_child(HANDLE hRead, HANDLE hWrite) {
-    int start, end;
-    DWORD bytesOp;
-    
-    ReadFile(hRead, &start, sizeof(start), &bytesOp, NULL);
-    ReadFile(hRead, &end, sizeof(end), &bytesOp, NULL);
-    CloseHandle(hRead);
+int main(int argc, char* argv[]) {
+    if (argc == 4) {
+        HANDLE hRead = (HANDLE)std::stoull(argv[2]);
+        HANDLE hWrite = (HANDLE)std::stoull(argv[3]);
 
-    for (int num = start; num <= end; ++num) {
-        if (is_prime(num)) {
-            WriteFile(hWrite, &num, sizeof(num), &bytesOp, NULL);
+        int start, end;
+        DWORD bytes;
+        ReadFile(hRead, &start, sizeof(start), &bytes, NULL);
+        ReadFile(hRead, &end, sizeof(end), &bytes, NULL);
+        CloseHandle(hRead);
+
+        for (int i = start; i <= end; i++) {
+            if (is_prime(i)) {
+                WriteFile(hWrite, &i, sizeof(i), &bytes, NULL);
+            }
         }
+        CloseHandle(hWrite);
+        return 0;
     }
-    CloseHandle(hWrite);
-}
 
-bool spawn_worker(int index, int chunk_size, const std::string& exe_name, HANDLE& outProcess, HANDLE& outReadPipe) {
-    HANDLE hReadP2C, hWriteP2C, hReadC2P, hWriteC2P;
+    HANDLE copii[10];
+    HANDLE tevi_citire[10];
     SECURITY_ATTRIBUTES sa = { sizeof(SECURITY_ATTRIBUTES), NULL, TRUE };
 
-    CreatePipe(&hReadP2C, &hWriteP2C, &sa, 0);
-    CreatePipe(&hReadC2P, &hWriteC2P, &sa, 0);
+    for (int i = 0; i < 10; i++) {
+        HANDLE p2c_r, p2c_w, c2p_r, c2p_w;
+        CreatePipe(&p2c_r, &p2c_w, &sa, 0);
+        CreatePipe(&c2p_r, &c2p_w, &sa, 0);
 
-    SetHandleInformation(hWriteP2C, HANDLE_FLAG_INHERIT, 0);
-    SetHandleInformation(hReadC2P, HANDLE_FLAG_INHERIT, 0);
+        SetHandleInformation(p2c_w, HANDLE_FLAG_INHERIT, 0);
+        SetHandleInformation(c2p_r, HANDLE_FLAG_INHERIT, 0);
 
-    std::string cmd = exe_name + " child " + 
-                      std::to_string((unsigned long long)hReadP2C) + " " + 
-                      std::to_string((unsigned long long)hWriteC2P);
+        std::string cmd = std::string(argv[0]) + " child " + 
+                          std::to_string((unsigned long long)p2c_r) + " " + 
+                          std::to_string((unsigned long long)c2p_w);
 
-    STARTUPINFOA si; 
-    ZeroMemory(&si, sizeof(si)); 
-    si.cb = sizeof(si);
-    PROCESS_INFORMATION pi; 
-    ZeroMemory(&pi, sizeof(pi));
+        STARTUPINFOA si = { sizeof(STARTUPINFOA) };
+        PROCESS_INFORMATION pi = { 0 };
 
-    if (!CreateProcessA(NULL, &cmd[0], NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi)) {
-        return false;
+        CreateProcessA(NULL, &cmd[0], NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi);
+
+        CloseHandle(p2c_r);
+        CloseHandle(c2p_w);
+        CloseHandle(pi.hThread);
+
+        copii[i] = pi.hProcess;
+        tevi_citire[i] = c2p_r;
+
+        int start = i * 1000 + 1;
+        int end = (i + 1) * 1000;
+        DWORD bytes;
+        WriteFile(p2c_w, &start, sizeof(start), &bytes, NULL);
+        WriteFile(p2c_w, &end, sizeof(end), &bytes, NULL);
+        CloseHandle(p2c_w);
     }
 
-    CloseHandle(hReadP2C);
-    CloseHandle(hWriteC2P);
-    CloseHandle(pi.hThread);
-
-    outProcess = pi.hProcess;
-    outReadPipe = hReadC2P;
-
-    int start = index * chunk_size + 1;
-    int end = (index + 1) * chunk_size;
-    DWORD bytesWritten;
-
-    WriteFile(hWriteP2C, &start, sizeof(start), &bytesWritten, NULL);
-    WriteFile(hWriteP2C, &end, sizeof(end), &bytesWritten, NULL);
-    CloseHandle(hWriteP2C);
-
-    return true;
-}
-
-void run_parent(const std::string& exe_name) {
-    const int num_processes = 10;
-    const int chunk_size = 1000;
-    
-    std::vector<HANDLE> childProcesses(num_processes);
-    std::vector<HANDLE> readHandles(num_processes);
-
-    for (int i = 0; i < num_processes; ++i) {
-        spawn_worker(i, chunk_size, exe_name, childProcesses[i], readHandles[i]);
-    }
-
-    for (int i = 0; i < num_processes; ++i) {
-        int prime;
-        DWORD bytesRead;
-        while (ReadFile(readHandles[i], &prime, sizeof(prime), &bytesRead, NULL) && bytesRead > 0) {
-            std::cout << prime << " ";
+    for (int i = 0; i < 10; i++) {
+        int prim;
+        DWORD bytes;
+        while (ReadFile(tevi_citire[i], &prim, sizeof(prim), &bytes, NULL) && bytes > 0) {
+            std::cout << prim << " ";
         }
-        CloseHandle(readHandles[i]);
+        CloseHandle(tevi_citire[i]);
     }
     std::cout << "\n";
 
-    WaitForMultipleObjects(num_processes, childProcesses.data(), TRUE, INFINITE);
-    for (int i = 0; i < num_processes; ++i) {
-        CloseHandle(childProcesses[i]);
+    WaitForMultipleObjects(10, copii, TRUE, INFINITE);
+    for (int i = 0; i < 10; i++) {
+        CloseHandle(copii[i]);
     }
-}
 
-int main(int argc, char* argv[]) {
-    if (argc == 4 && std::string(argv[1]) == "child") {
-        HANDLE hRead = (HANDLE)std::stoull(argv[2]);
-        HANDLE hWrite = (HANDLE)std::stoull(argv[3]);
-        run_child(hRead, hWrite);
-        return 0;
-    }
-    
-    run_parent(argv[0]);
     return 0;
 }
