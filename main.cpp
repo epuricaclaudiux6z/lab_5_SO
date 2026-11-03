@@ -1,6 +1,6 @@
 #include <iostream>
-#include <unistd.h>
-#include <sys/wait.h>
+#include <windows.h>
+#include <string>
 #include <vector>
 
 bool is_prime(int n) {
@@ -13,61 +13,99 @@ bool is_prime(int n) {
     return true;
 }
 
-int main() {
+void run_child(HANDLE hRead, HANDLE hWrite) {
+    int start, end;
+    DWORD bytesOp;
+    
+    ReadFile(hRead, &start, sizeof(start), &bytesOp, NULL);
+    ReadFile(hRead, &end, sizeof(end), &bytesOp, NULL);
+    CloseHandle(hRead);
+
+    for (int num = start; num <= end; ++num) {
+        if (is_prime(num)) {
+            WriteFile(hWrite, &num, sizeof(num), &bytesOp, NULL);
+        }
+    }
+    CloseHandle(hWrite);
+}
+
+bool spawn_worker(int index, int chunk_size, const std::string& exe_name, HANDLE& outProcess, HANDLE& outReadPipe) {
+    HANDLE hReadP2C, hWriteP2C, hReadC2P, hWriteC2P;
+    SECURITY_ATTRIBUTES sa = { sizeof(SECURITY_ATTRIBUTES), NULL, TRUE };
+
+    CreatePipe(&hReadP2C, &hWriteP2C, &sa, 0);
+    CreatePipe(&hReadC2P, &hWriteC2P, &sa, 0);
+
+    SetHandleInformation(hWriteP2C, HANDLE_FLAG_INHERIT, 0);
+    SetHandleInformation(hReadC2P, HANDLE_FLAG_INHERIT, 0);
+
+    std::string cmd = exe_name + " child " + 
+                      std::to_string((unsigned long long)hReadP2C) + " " + 
+                      std::to_string((unsigned long long)hWriteC2P);
+
+    STARTUPINFOA si; 
+    ZeroMemory(&si, sizeof(si)); 
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi; 
+    ZeroMemory(&pi, sizeof(pi));
+
+    if (!CreateProcessA(NULL, &cmd[0], NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi)) {
+        return false;
+    }
+
+    CloseHandle(hReadP2C);
+    CloseHandle(hWriteC2P);
+    CloseHandle(pi.hThread);
+
+    outProcess = pi.hProcess;
+    outReadPipe = hReadC2P;
+
+    int start = index * chunk_size + 1;
+    int end = (index + 1) * chunk_size;
+    DWORD bytesWritten;
+
+    WriteFile(hWriteP2C, &start, sizeof(start), &bytesWritten, NULL);
+    WriteFile(hWriteP2C, &end, sizeof(end), &bytesWritten, NULL);
+    CloseHandle(hWriteP2C);
+
+    return true;
+}
+
+void run_parent(const std::string& exe_name) {
     const int num_processes = 10;
     const int chunk_size = 1000;
-    std::vector<int> c2p_read_ends(num_processes);
-    std::vector<pid_t> pids(num_processes);
+    
+    std::vector<HANDLE> childProcesses(num_processes);
+    std::vector<HANDLE> readHandles(num_processes);
 
     for (int i = 0; i < num_processes; ++i) {
-        int p2c[2];
-        int c2p[2];
-
-        if (pipe(p2c) == -1 || pipe(c2p) == -1) return 1;
-
-        pid_t pid = fork();
-        if (pid < 0) return 1;
-
-        if (pid == 0) {
-            close(p2c[1]);
-            close(c2p[0]);
-
-            int start, end;
-            read(p2c[0], &start, sizeof(start));
-            read(p2c[0], &end, sizeof(end));
-            close(p2c[0]);
-
-            for (int num = start; num <= end; ++num) {
-                if (is_prime(num)) {
-                    write(c2p[1], &num, sizeof(num));
-                }
-            }
-            close(c2p[1]);
-            exit(0);
-        } else {
-            close(p2c[0]);
-            close(c2p[1]);
-
-            int start = i * chunk_size + 1;
-            int end = (i + 1) * chunk_size;
-
-            write(p2c[1], &start, sizeof(start));
-            write(p2c[1], &end, sizeof(end));
-            close(p2c[1]);
-
-            c2p_read_ends[i] = c2p[0];
-            pids[i] = pid;
-        }
+        spawn_worker(i, chunk_size, exe_name, childProcesses[i], readHandles[i]);
     }
 
     for (int i = 0; i < num_processes; ++i) {
         int prime;
-        while (read(c2p_read_ends[i], &prime, sizeof(prime)) > 0) {
+        DWORD bytesRead;
+        while (ReadFile(readHandles[i], &prime, sizeof(prime), &bytesRead, NULL) && bytesRead > 0) {
             std::cout << prime << " ";
         }
-        close(c2p_read_ends[i]);
-        waitpid(pids[i], nullptr, 0);
+        CloseHandle(readHandles[i]);
     }
     std::cout << "\n";
+
+    WaitForMultipleObjects(num_processes, childProcesses.data(), TRUE, INFINITE);
+    for (int i = 0; i < num_processes; ++i) {
+        CloseHandle(childProcesses[i]);
+    }
+}
+
+int main(int argc, char* argv[]) {
+    if (argc == 4 && std::string(argv[1]) == "child") {
+        HANDLE hRead = (HANDLE)std::stoull(argv[2]);
+        HANDLE hWrite = (HANDLE)std::stoull(argv[3]);
+        run_child(hRead, hWrite);
+        return 0;
+    }
+    
+    run_parent(argv[0]);
     return 0;
 }
